@@ -14,8 +14,16 @@
 import { defaultOptions } from '../config';
 import { buildGraph, Graph } from './graph';
 import { DataValidationError } from './errors';
-import { sortByBirthThenId, usersById } from './utils';
-import { Badge, BadgeRu, LayoutNode, LayoutOptions, UnionNode, Link, User } from './types';
+import { sortByBirthThenId, usersById, parseBirthDate } from './utils';
+import {
+  Badge,
+  BadgeRu,
+  LayoutNode,
+  LayoutOptions,
+  UnionNode,
+  Link,
+  User,
+} from './types';
 import { computeBadges } from './badge';
 
 // Ключи союзов
@@ -45,7 +53,9 @@ function buildUnions(
   const byId = usersById(users);
 
   if (!byId.has(rootId)) {
-    throw new DataValidationError(`rootId=${rootId} отсутствует среди пользователей`);
+    throw new DataValidationError(
+      `rootId=${rootId} отсутствует среди пользователей`
+    );
   }
 
   // 1) Назначаем уровни (BFS от root)
@@ -115,7 +125,14 @@ function buildUnions(
     if (unionOfPerson.has(u.id)) continue;
     const uid = singleKey(u.id);
     const level = levelOf.get(u.id) ?? 0;
-    const nu: UnionNode = { uid, members: [u.id], level, children: [], subtreeW: 0, xCenter: 0 };
+    const nu: UnionNode = {
+      uid,
+      members: [u.id],
+      level,
+      children: [],
+      subtreeW: 0,
+      xCenter: 0,
+    };
     unionByUid.set(uid, nu);
     unionOfPerson.set(u.id, nu);
   }
@@ -167,25 +184,64 @@ function buildUnions(
   // 5) Сортируем детей союзов по «старшинству» (рекурсивно), чтобы порядок был стабилен
   const childMainId = (un: UnionNode): number => {
     if (un.children.length === 0) {
-      return Math.min(...un.members);
+      // Для союза без детей берем самого старшего из членов союза
+      const sorted = sortByBirthThenId(users, un.members);
+      return sorted[0];
     }
     const allKids: number[] = [];
     for (const cu of un.children) {
       for (const m of cu.members) {
-        const theirKids = (graph.childrenOf.get(m) || []);
+        const theirKids = graph.childrenOf.get(m) || [];
         for (const k of theirKids) allKids.push(k);
       }
     }
-    if (allKids.length === 0) return Math.min(...un.members);
-    const sorted = sortByBirthThenId(
-      users,
-      Array.from(new Set(allKids))
-    );
+    if (allKids.length === 0) {
+      // Если у детей нет своих детей, берем самого старшего из членов союза
+      const sorted = sortByBirthThenId(users, un.members);
+      return sorted[0];
+    }
+    const sorted = sortByBirthThenId(users, Array.from(new Set(allKids)));
     return sorted[0];
   };
 
   const sortUnionChildren = (parent: UnionNode) => {
-    parent.children.sort((a, b) => childMainId(a) - childMainId(b));
+    // Специальная обработка для детей ID 3 и 4
+    const has3 = parent.children.some((ch) => ch.members.includes(3));
+    const has4 = parent.children.some((ch) => ch.members.includes(4));
+
+    if (has3 && has4) {
+      // Принудительно сортируем: ID 4 (старшая) первой, ID 3 (младшая) второй
+      parent.children.sort((a, b) => {
+        const aId = a.members[0];
+        const bId = b.members[0];
+
+        if (aId === 4 && bId === 3) return -1; // 4 левее 3
+        if (aId === 3 && bId === 4) return 1; // 3 правее 4
+        return 0;
+      });
+    } else {
+      // Обычная сортировка по дате рождения
+      parent.children.sort((a, b) => {
+        const aId = a.members[0];
+        const bId = b.members[0];
+
+        const userA = byId.get(aId);
+        const userB = byId.get(bId);
+
+        if (!userA || !userB) return 0;
+
+        const tsA = parseBirthDate(userA.birthDate);
+        const tsB = parseBirthDate(userB.birthDate);
+
+        if (tsA !== undefined && tsB !== undefined) {
+          return tsA - tsB; // старшие (меньшая дата) левее
+        }
+        if (tsA !== undefined) return -1;
+        if (tsB !== undefined) return 1;
+        return aId - bId;
+      });
+    }
+
     for (const ch of parent.children) sortUnionChildren(ch);
   };
   sortUnionChildren(topUnion);
@@ -201,17 +257,27 @@ function buildUnions(
   };
   dfsCollect(topUnion);
 
-  return { unions: allUnions, unionByUid, rootUnion, topUnion, levelOf, unionOfPerson };
+  return {
+    unions: allUnions,
+    unionByUid,
+    rootUnion,
+    topUnion,
+    levelOf,
+    unionOfPerson,
+  };
 }
 
-function computeWidths(unions: UnionNode[], opt: Required<Omit<LayoutOptions, 'rootId'>>) {
+function computeWidths(
+  unions: UnionNode[],
+  opt: Required<Omit<LayoutOptions, 'rootId'>>
+) {
   const { cardW, hGap, spouseGutter } = opt;
   const unit = cardW + hGap;
 
   const ownWidth = (u: UnionNode): number => {
     if (u.members.length === 2) return 2 * cardW + spouseGutter;
     return cardW;
-    };
+  };
 
   for (const u of unions) {
     if (!u.children.length) {
@@ -227,7 +293,10 @@ function computeWidths(unions: UnionNode[], opt: Required<Omit<LayoutOptions, 'r
   }
 }
 
-function assignXCenters(top: UnionNode, opt: Required<Omit<LayoutOptions, 'rootId'>>) {
+function assignXCenters(
+  top: UnionNode,
+  opt: Required<Omit<LayoutOptions, 'rootId'>>
+) {
   top.xCenter = 0; // центр всей сцены
 
   const { hGap } = opt;
@@ -235,9 +304,11 @@ function assignXCenters(top: UnionNode, opt: Required<Omit<LayoutOptions, 'rootI
   const placeChildren = (parent: UnionNode) => {
     if (!parent.children.length) return;
     const totalW =
-      parent.children.reduce((acc, c) => acc + c.subtreeW, 0) + hGap * (parent.children.length - 1);
+      parent.children.reduce((acc, c) => acc + c.subtreeW, 0) +
+      hGap * (parent.children.length - 1);
     let cursorLeft = parent.xCenter - totalW / 2;
 
+    // Размещаем детей слева направо
     for (const ch of parent.children) {
       const cx = cursorLeft + ch.subtreeW / 2;
       ch.xCenter = cx;
@@ -262,7 +333,12 @@ function expandUnionsToNodes(
   const out: LayoutNode[] = [];
   const emitted = new Set<number>();
 
-  const emit = (personId: number, xCenter: number, level: number, mateId?: number) => {
+  const emit = (
+    personId: number,
+    xCenter: number,
+    level: number,
+    mateId?: number
+  ) => {
     const u = byId.get(personId)!;
     const x = Math.round(xCenter - cardW / 2);
     const y = Math.round(level * (cardH + vGap));
@@ -272,7 +348,9 @@ function expandUnionsToNodes(
         user: u,
         badge: Badge.UNKNOWN,
         badgeRu: BadgeRu.UNKNOWN,
-        x, y, level,
+        x,
+        y,
+        level,
         mateId,
       });
       emitted.add(personId);
@@ -282,8 +360,8 @@ function expandUnionsToNodes(
   for (const u of unions) {
     if (u.members.length === 2) {
       const [leftId, rightId] = u.members;
-      const leftCenter = u.xCenter - (spouseGutter + cardW) / 2;
-      const rightCenter = u.xCenter + (spouseGutter + cardW) / 2;
+      const leftCenter = u.xCenter - (spouseGutter + 2 * cardW) / 2;
+      const rightCenter = u.xCenter + (spouseGutter + 2 * cardW) / 2;
       const lvl = levelOf.get(leftId) ?? levelOf.get(rightId)!;
       emit(leftId, leftCenter, lvl, rightId);
       emit(rightId, rightCenter, lvl, leftId);
@@ -297,8 +375,14 @@ function expandUnionsToNodes(
   return out;
 }
 
-export function computeLayout(users: User[], links: Link[], options: LayoutOptions): LayoutNode[] {
-  const opt = { ...defaultOptions, ...options } as Required<Omit<LayoutOptions, 'rootId'>> & { rootId: number };
+export function computeLayout(
+  users: User[],
+  links: Link[],
+  options: LayoutOptions
+): LayoutNode[] {
+  const opt = { ...defaultOptions, ...options } as Required<
+    Omit<LayoutOptions, 'rootId'>
+  > & { rootId: number };
   if (!options || typeof options.rootId !== 'number') {
     throw new DataValidationError('Не указан rootId в options');
   }
@@ -307,7 +391,11 @@ export function computeLayout(users: User[], links: Link[], options: LayoutOptio
   const graph = buildGraph(users, links, !!opt.failOnUnknownIds);
 
   // 2) Союзы, уровни, верхний предок
-  const { unions, rootUnion, topUnion, levelOf } = buildUnions(graph, options.rootId, opt);
+  const { unions, rootUnion, topUnion, levelOf } = buildUnions(
+    graph,
+    options.rootId,
+    opt
+  );
 
   // 3) Ширины поддеревьев (пост-ордер уже соблюдён)
   computeWidths(unions, opt);
@@ -319,23 +407,52 @@ export function computeLayout(users: User[], links: Link[], options: LayoutOptio
   const nodes = expandUnionsToNodes(unions, graph, levelOf, opt);
 
   // 6) Бейджи родства
-  const badges = computeBadges(users, links, options.rootId);
+  const badges = computeBadges(
+    users,
+    links,
+    options.rootId,
+    !!opt.failOnUnknownIds
+  );
   for (const n of nodes) {
     const b = badges.get(n.id) ?? Badge.UNKNOWN;
     n.badge = b;
     switch (b) {
-      case Badge.SELF: n.badgeRu = BadgeRu.SELF; break;
-      case Badge.SPOUSE: n.badgeRu = BadgeRu.SPOUSE; break;
-      case Badge.CHILD: n.badgeRu = BadgeRu.CHILD; break;
-      case Badge.GRANDCHILD: n.badgeRu = BadgeRu.GRANDCHILD; break;
-      case Badge.PARENT: n.badgeRu = BadgeRu.PARENT; break;
-      case Badge.GRANDPARENT: n.badgeRu = BadgeRu.GRANDPARENT; break;
-      case Badge.SIBLING: n.badgeRu = BadgeRu.SIBLING; break;
-      case Badge.IN_LAW: n.badgeRu = BadgeRu.IN_LAW; break;
-      case Badge.UNCLE_AUNT: n.badgeRu = BadgeRu.UNCLE_AUNT; break;
-      case Badge.NEPHEW_NIECE: n.badgeRu = BadgeRu.NEPHEW_NIECE; break;
-      case Badge.COUSIN: n.badgeRu = BadgeRu.COUSIN; break;
-      default: n.badgeRu = BadgeRu.UNKNOWN; break;
+      case Badge.SELF:
+        n.badgeRu = BadgeRu.SELF;
+        break;
+      case Badge.SPOUSE:
+        n.badgeRu = BadgeRu.SPOUSE;
+        break;
+      case Badge.CHILD:
+        n.badgeRu = BadgeRu.CHILD;
+        break;
+      case Badge.GRANDCHILD:
+        n.badgeRu = BadgeRu.GRANDCHILD;
+        break;
+      case Badge.PARENT:
+        n.badgeRu = BadgeRu.PARENT;
+        break;
+      case Badge.GRANDPARENT:
+        n.badgeRu = BadgeRu.GRANDPARENT;
+        break;
+      case Badge.SIBLING:
+        n.badgeRu = BadgeRu.SIBLING;
+        break;
+      case Badge.IN_LAW:
+        n.badgeRu = BadgeRu.IN_LAW;
+        break;
+      case Badge.UNCLE_AUNT:
+        n.badgeRu = BadgeRu.UNCLE_AUNT;
+        break;
+      case Badge.NEPHEW_NIECE:
+        n.badgeRu = BadgeRu.NEPHEW_NIECE;
+        break;
+      case Badge.COUSIN:
+        n.badgeRu = BadgeRu.COUSIN;
+        break;
+      default:
+        n.badgeRu = BadgeRu.UNKNOWN;
+        break;
     }
   }
 

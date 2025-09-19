@@ -11,12 +11,16 @@
  * 7) Собираем LayoutNode[] и вычисляем бейджи.
  */
 
-import { buildGraph } from "./graph";
-import { Badge, Link, User } from "./types";
+import { buildGraph } from './graph';
+import { Badge, Link, User } from './types';
 
-
-export function computeBadges(users: User[], links: Link[], rootId: number): Map<number, Badge> {
-  const g = buildGraph(users, links, true);
+export function computeBadges(
+  users: User[],
+  links: Link[],
+  rootId: number,
+  failOnUnknownIds: boolean = true
+): Map<number, Badge> {
+  const g = buildGraph(users, links, failOnUnknownIds);
   const res = new Map<number, Badge>();
 
   // SELF
@@ -30,7 +34,8 @@ export function computeBadges(users: User[], links: Link[], rootId: number): Map
   const markAncestors = (start: number, depth = 1) => {
     const ps = g.parentsOf.get(start) || [];
     for (const p of ps) {
-      if (!res.has(p)) res.set(p, depth === 1 ? Badge.PARENT : Badge.GRANDPARENT);
+      if (!res.has(p))
+        res.set(p, depth === 1 ? Badge.PARENT : Badge.GRANDPARENT);
       markAncestors(p, depth + 1);
     }
   };
@@ -92,7 +97,9 @@ export function computeBadges(users: User[], links: Link[], rootId: number): Map
   }
 
   // РџР»РµРјСЏРЅРЅРёРєРё/РїР»РµРјСЏРЅРЅРёС†С‹: РґРµС‚Рё Р±СЂР°С‚СЊРµРІ/СЃРµСЃС‚С‘СЂ root
-  const siblings = users.filter((u) => res.get(u.id) === Badge.SIBLING).map((u) => u.id);
+  const siblings = users
+    .filter((u) => res.get(u.id) === Badge.SIBLING)
+    .map((u) => u.id);
   for (const s of siblings) {
     const kids = g.childrenOf.get(s) || [];
     for (const k of kids) {
@@ -107,4 +114,3 @@ export function computeBadges(users: User[], links: Link[], rootId: number): Map
 
   return res;
 }
-
