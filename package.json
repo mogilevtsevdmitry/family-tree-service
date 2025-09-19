@@ -10,7 +10,9 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "demo": "npm run build && node run-demo.js",
+    "demo:full": "npm run build && node dist/demo-layout.js"
   },
   "keywords": [],
   "author": "",
