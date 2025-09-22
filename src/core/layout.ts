@@ -111,6 +111,8 @@ function buildUnions(
           level: levelOf.get(a) ?? 0,
           children: [],
           subtreeW: 0,
+          ownWidth: 0,
+          xLeft: 0,
           xCenter: 0,
         };
         unionByUid.set(uid, u);
@@ -131,6 +133,8 @@ function buildUnions(
       level,
       children: [],
       subtreeW: 0,
+      ownWidth: 0,
+      xLeft: 0,
       xCenter: 0,
     };
     unionByUid.set(uid, nu);
@@ -167,18 +171,31 @@ function buildUnions(
   // 4) Определяем корневой и ВЕРХНИЙ союзы
   const rootUnion = unionOfPerson.get(rootId)!;
 
-  // Поднимаемся от rootUnion максимально вверх по parentsOfUnion — получаем topUnion
-  let topUnion = rootUnion;
-  const seen = new Set<string>();
-  while (true) {
-    const parents = parentsOfUnion.get(topUnion.uid) || [];
-    if (!parents.length) break;
-    // берём родителя с минимальным level (наиболее верхний)
-    let next = parents[0];
-    for (const p of parents) if (p.level < next.level) next = p;
-    if (seen.has(next.uid)) break;
-    seen.add(next.uid);
-    topUnion = next;
+  const topCandidatesSet = new Set<UnionNode>();
+  for (const union of unionByUid.values()) topCandidatesSet.add(union);
+  for (const childUid of parentsOfUnion.keys()) {
+    const childUnion = unionByUid.get(childUid);
+    if (childUnion) topCandidatesSet.delete(childUnion);
+  }
+  const topCandidates = Array.from(topCandidatesSet);
+
+  let topUnion: UnionNode;
+  if (topCandidates.length === 0) {
+    topUnion = rootUnion;
+  } else if (topCandidates.length === 1) {
+    topUnion = topCandidates[0];
+  } else {
+    const minLevel = Math.min(...topCandidates.map((u) => u.level));
+    topUnion = {
+      uid: '__virtual-root__',
+      members: [],
+      level: minLevel - 1,
+      children: topCandidates,
+      subtreeW: 0,
+      ownWidth: 0,
+      xLeft: 0,
+      xCenter: 0,
+    };
   }
 
   // 5) Сортируем детей союзов по «старшинству» (рекурсивно), чтобы порядок был стабилен
@@ -268,56 +285,123 @@ function buildUnions(
 }
 
 function computeWidths(
-  unions: UnionNode[],
-  opt: Required<Omit<LayoutOptions, 'rootId'>>
-) {
-  const { cardW, hGap, spouseGutter } = opt;
-  const unit = cardW + hGap;
-
-  const ownWidth = (u: UnionNode): number => {
-    if (u.members.length === 2) return 2 * cardW + spouseGutter;
-    return cardW;
-  };
-
-  for (const u of unions) {
-    if (!u.children.length) {
-      u.subtreeW = Math.max(ownWidth(u), unit);
-      continue;
-    }
-    const sumChildren = u.children.reduce((acc, c) => acc + c.subtreeW, 0);
-    const gaps = hGap * (u.children.length - 1);
-    const childrenWidth = sumChildren + gaps;
-    u.subtreeW = Math.max(childrenWidth, ownWidth(u));
-    const cols = Math.ceil(u.subtreeW / unit);
-    u.subtreeW = cols * unit - hGap; // последняя колонка без правого hGap
-  }
-}
-
-function assignXCenters(
   top: UnionNode,
   opt: Required<Omit<LayoutOptions, 'rootId'>>
 ) {
-  top.xCenter = 0; // центр всей сцены
+  const { cardW, spouseGutter, hGap } = opt;
 
+  const widthOf = (union: UnionNode): number => {
+    if (union.members.length === 2) return 2 * cardW + spouseGutter;
+    if (union.members.length === 1) return cardW;
+    return 0;
+  };
+
+  const dfs = (union: UnionNode): number => {
+    union.ownWidth = widthOf(union);
+
+    if (!union.children.length) {
+      union.subtreeW = union.ownWidth;
+      return union.subtreeW;
+    }
+
+    let cursor = 0;
+    let leftMost = Number.POSITIVE_INFINITY;
+    let rightMost = Number.NEGATIVE_INFINITY;
+
+    for (let i = 0; i < union.children.length; i++) {
+      const child = union.children[i];
+      const childWidth = dfs(child);
+      const center = cursor + child.ownWidth / 2;
+      leftMost = Math.min(leftMost, center - childWidth / 2);
+      rightMost = Math.max(rightMost, center + childWidth / 2);
+      cursor += child.ownWidth;
+      if (i < union.children.length - 1) cursor += hGap;
+    }
+
+    const span = Math.max(rightMost - leftMost, cursor);
+    union.subtreeW = Math.max(union.ownWidth, span);
+    return union.subtreeW;
+  };
+
+  dfs(top);
+}
+
+function assignPositions(
+  top: UnionNode,
+  opt: Required<Omit<LayoutOptions, 'rootId'>>
+) {
   const { hGap } = opt;
 
-  const placeChildren = (parent: UnionNode) => {
-    if (!parent.children.length) return;
-    const totalW =
-      parent.children.reduce((acc, c) => acc + c.subtreeW, 0) +
-      hGap * (parent.children.length - 1);
-    let cursorLeft = parent.xCenter - totalW / 2;
+  type Segment = {
+    child: UnionNode;
+    baseOffset: number;
+    overhang: number;
+    slotLeft: number;
+    slotRight: number;
+  };
 
-    // Размещаем детей слева направо
-    for (const ch of parent.children) {
-      const cx = cursorLeft + ch.subtreeW / 2;
-      ch.xCenter = cx;
-      placeChildren(ch);
-      cursorLeft += ch.subtreeW + hGap;
+  const dfs = (union: UnionNode, subtreeLeft: number) => {
+    const ownLeft = subtreeLeft + (union.subtreeW - union.ownWidth) / 2;
+    union.xLeft = ownLeft;
+    union.xCenter = ownLeft + union.ownWidth / 2;
+
+    if (!union.children.length) return;
+
+    const segments: Segment[] = [];
+
+    let baseCursor = 0;
+    for (let i = 0; i < union.children.length; i++) {
+      const child = union.children[i];
+      const overhang = Math.max(0, (child.subtreeW - child.ownWidth) / 2);
+      segments.push({
+        child,
+        baseOffset: baseCursor,
+        overhang,
+        slotLeft: baseCursor - overhang,
+        slotRight: baseCursor + child.ownWidth + overhang,
+      });
+      baseCursor += child.ownWidth;
+      if (i < union.children.length - 1) baseCursor += hGap;
+    }
+
+    let adjustment = 0;
+    let prevRight = Number.NEGATIVE_INFINITY;
+    for (const segment of segments) {
+      let offset = segment.baseOffset + adjustment;
+      let left = offset - segment.overhang;
+      let right = offset + segment.child.ownWidth + segment.overhang;
+      if (prevRight !== Number.NEGATIVE_INFINITY && left < prevRight + hGap) {
+        const delta = prevRight + hGap - left;
+        adjustment += delta;
+        offset += delta;
+        left += delta;
+        right += delta;
+      }
+      segment.baseOffset = offset;
+      segment.slotLeft = left;
+      segment.slotRight = right;
+      prevRight = right;
+    }
+
+    const cardLeft = segments[0].baseOffset;
+    const cardRight = Math.max(
+      ...segments.map((segment) => segment.baseOffset + segment.child.ownWidth)
+    );
+    const cardSpan = cardRight - cardLeft;
+    const cardCenter = cardLeft + cardSpan / 2;
+    const totalShift = union.xCenter - cardCenter;
+
+    for (const segment of segments) {
+      const offset = segment.baseOffset + totalShift;
+      const slotLeft = segment.slotLeft + totalShift;
+      segment.child.xLeft = offset;
+      segment.child.xCenter = offset + segment.child.ownWidth / 2;
+      const childSubtreeLeft = slotLeft;
+      dfs(segment.child, childSubtreeLeft);
     }
   };
 
-  placeChildren(top);
+  dfs(top, 0);
 }
 
 function expandUnionsToNodes(
@@ -335,45 +419,48 @@ function expandUnionsToNodes(
 
   const emit = (
     personId: number,
-    xCenter: number,
+    xLeft: number,
     level: number,
     mateId?: number
   ) => {
-    const u = byId.get(personId)!;
-    const x = Math.round(xCenter - cardW / 2);
+    const user = byId.get(personId);
+    if (!user || emitted.has(personId)) return;
+    const x = Math.round(xLeft);
     const y = Math.round(level * (cardH + vGap));
-    if (!emitted.has(personId)) {
-      out.push({
-        id: personId,
-        user: u,
-        badge: Badge.UNKNOWN,
-        badgeRu: BadgeRu.UNKNOWN,
-        x,
-        y,
-        level,
-        mateId,
-      });
-      emitted.add(personId);
-    }
+    out.push({
+      id: personId,
+      user,
+      badge: Badge.UNKNOWN,
+      badgeRu: BadgeRu.UNKNOWN,
+      x,
+      y,
+      level,
+      mateId,
+    });
+    emitted.add(personId);
   };
 
-  for (const u of unions) {
-    if (u.members.length === 2) {
-      const [leftId, rightId] = u.members;
-      const leftCenter = u.xCenter - (spouseGutter + 2 * cardW) / 2;
-      const rightCenter = u.xCenter + (spouseGutter + 2 * cardW) / 2;
-      const lvl = levelOf.get(leftId) ?? levelOf.get(rightId)!;
-      emit(leftId, leftCenter, lvl, rightId);
-      emit(rightId, rightCenter, lvl, leftId);
+  for (const union of unions) {
+    if (union.members.length === 0) continue;
+
+    if (union.members.length === 2) {
+      const [leftId, rightId] = union.members;
+      const level = levelOf.get(leftId) ?? levelOf.get(rightId)!;
+      const leftX = union.xLeft;
+      const rightX = union.xLeft + cardW + spouseGutter;
+      emit(leftId, leftX, level, rightId);
+      emit(rightId, rightX, level, leftId);
     } else {
-      const [only] = u.members;
-      const lvl = levelOf.get(only) ?? 0;
-      emit(only, u.xCenter, lvl);
+      const [only] = union.members;
+      const level = levelOf.get(only) ?? 0;
+      emit(only, union.xLeft, level);
     }
   }
 
   return out;
 }
+
+
 
 export function computeLayout(
   users: User[],
@@ -397,64 +484,70 @@ export function computeLayout(
     opt
   );
 
-  // 3) Ширины поддеревьев (пост-ордер уже соблюдён)
-  computeWidths(unions, opt);
+  computeWidths(topUnion, opt);
 
-  // 4) Расстановка X-центров — от ВЕРХНЕГО предка
-  assignXCenters(topUnion, opt);
+  assignPositions(topUnion, opt);
+  const rootShift = rootUnion.xLeft;
+  if (rootShift !== 0) {
+    for (const union of unions) {
+      union.xLeft -= rootShift;
+      union.xCenter -= rootShift;
+    }
+  }
 
-  // 5) Экспансия в реальные ноды
   const nodes = expandUnionsToNodes(unions, graph, levelOf, opt);
 
-  // 6) Бейджи родства
   const badges = computeBadges(
     users,
     links,
     options.rootId,
     !!opt.failOnUnknownIds
   );
-  for (const n of nodes) {
-    const b = badges.get(n.id) ?? Badge.UNKNOWN;
-    n.badge = b;
-    switch (b) {
+  for (const node of nodes) {
+    const badge = badges.get(node.id) ?? Badge.UNKNOWN;
+    node.badge = badge;
+    switch (badge) {
       case Badge.SELF:
-        n.badgeRu = BadgeRu.SELF;
+        node.badgeRu = BadgeRu.SELF;
         break;
       case Badge.SPOUSE:
-        n.badgeRu = BadgeRu.SPOUSE;
+        node.badgeRu = BadgeRu.SPOUSE;
         break;
       case Badge.CHILD:
-        n.badgeRu = BadgeRu.CHILD;
+        node.badgeRu = BadgeRu.CHILD;
         break;
       case Badge.GRANDCHILD:
-        n.badgeRu = BadgeRu.GRANDCHILD;
+        node.badgeRu = BadgeRu.GRANDCHILD;
         break;
       case Badge.PARENT:
-        n.badgeRu = BadgeRu.PARENT;
+        node.badgeRu = BadgeRu.PARENT;
         break;
       case Badge.GRANDPARENT:
-        n.badgeRu = BadgeRu.GRANDPARENT;
+        node.badgeRu = BadgeRu.GRANDPARENT;
         break;
       case Badge.SIBLING:
-        n.badgeRu = BadgeRu.SIBLING;
+        node.badgeRu = BadgeRu.SIBLING;
         break;
       case Badge.IN_LAW:
-        n.badgeRu = BadgeRu.IN_LAW;
+        node.badgeRu = BadgeRu.IN_LAW;
         break;
       case Badge.UNCLE_AUNT:
-        n.badgeRu = BadgeRu.UNCLE_AUNT;
+        node.badgeRu = BadgeRu.UNCLE_AUNT;
         break;
       case Badge.NEPHEW_NIECE:
-        n.badgeRu = BadgeRu.NEPHEW_NIECE;
+        node.badgeRu = BadgeRu.NEPHEW_NIECE;
         break;
       case Badge.COUSIN:
-        n.badgeRu = BadgeRu.COUSIN;
+        node.badgeRu = BadgeRu.COUSIN;
         break;
       default:
-        n.badgeRu = BadgeRu.UNKNOWN;
+        node.badgeRu = BadgeRu.UNKNOWN;
         break;
     }
   }
 
+  if (process.env.DEBUG_LAYOUT === "1") {
+    (nodes as any).__unions = unions;
+  }
   return nodes;
 }

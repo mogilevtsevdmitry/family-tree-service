@@ -1,6 +1,4 @@
-// Типы домена и layout
-
-export type Sex = 'male' | 'female';
+﻿export type Sex = 'male' | 'female';
 
 export interface User {
   id: number;
@@ -8,6 +6,7 @@ export interface User {
   firstName: string;
   patronymic?: string;
   birthDate?: string; // "DD.MM.YYYY"
+  deathDate?: string; // "DD.MM.YYYY"
   sex?: Sex;
 }
 
@@ -15,7 +14,6 @@ export type Link =
   | { type: 'spouse'; a: number; b: number }
   | { type: 'parent'; parent: number; child: number };
 
-// Бейджи родства (к корневому пользователю)
 export enum Badge {
   SELF = 'self',
   SPOUSE = 'spouse',
@@ -31,7 +29,6 @@ export enum Badge {
   UNKNOWN = 'unknown',
 }
 
-// Русская расшифровка бейджей
 export enum BadgeRu {
   SELF = 'Вы',
   SPOUSE = 'Супруг/супруга',
@@ -47,7 +44,6 @@ export enum BadgeRu {
   UNKNOWN = 'Не определено',
 }
 
-// Опции раскладки
 export interface LayoutOptions {
   rootId: number;
   cardW?: number;      // по умолчанию 220
@@ -58,7 +54,6 @@ export interface LayoutOptions {
   failOnUnknownIds?: boolean; // true -> бросать ошибку на несуществующие id в связях
 }
 
-// Выходной тип: ноды для отрисовки (только люди)
 export interface LayoutNode {
   id: number;
   user: User;
@@ -70,9 +65,6 @@ export interface LayoutNode {
   mateId?: number;
 }
 
-// Внутренние типы расчёта
-
-// «Союз» — либо одиночка-родитель (single), либо супружеская пара (couple)
 export interface UnionNode {
   uid: string;           // стабильный ключ союза
   members: number[];     // [id] или [idA, idB] (в порядке: male слева, если известен)
@@ -80,5 +72,7 @@ export interface UnionNode {
   children: UnionNode[]; // дочерние союзы (следующее поколение)
   // Геометрия в расчёте:
   subtreeW: number;      // ширина поддерева в пикселях (включая пробелы)
+  ownWidth: number;      // width of the union block
+  xLeft: number;         // left edge of the union block
   xCenter: number;       // центр союза по X (для последующей экспансии в людей)
 }
